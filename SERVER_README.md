@@ -1,0 +1,351 @@
+# VACE Video Processing Server
+
+A Flask-based HTTP server with async processing and progress tracking for long-running VACE tasks.
+
+## Features
+
+- **Async Processing**: Non-blocking video processing with background tasks
+- **Progress Tracking**: Real-time progress updates with percentage and status messages
+- **Job Management**: Submit jobs, monitor progress, and download results
+- **Video Upload**: Accepts video files up to 500MB
+- **Text Prompts**: Process videos with custom text prompts
+- **Depth Task**: Uses VACE's depth control task with Wan model
+- **Ping Endpoint**: Health check for connectivity testing
+- **Auto Cleanup**: Automatically removes old files after 24 hours
+- **Error Handling**: Comprehensive error handling and logging
+
+## Setup
+
+1. **Install Dependencies**:
+   ```bash
+   pip install -r requirements.txt
+   ```
+
+2. **Ensure VACE is Set Up**:
+   - Make sure you have the VACE pipeline working
+   - Ensure the Wan model is downloaded and configured
+   - Test that `python vace/vace_pipeline.py --base wan --task depth` works
+
+3. **Start the Server**:
+   ```bash
+   python vace_server.py
+   ```
+
+   The server will start on `http://0.0.0.0:5000` (accessible from any network interface).
+
+## API Endpoints
+
+### 1. Health Check (Ping)
+```bash
+GET /ping
+```
+
+**Response**:
+```json
+{
+  "status": "ok",
+  "message": "VACE server is running",
+  "timestamp": 1234567890.123
+}
+```
+
+### 2. Submit Video for Processing (Non-blocking)
+```bash
+POST /process
+```
+
+**Parameters**:
+- `video` (file): Video file to process (mp4, avi, mov, mkv, webm)
+- `prompt` (text): Text prompt for video processing
+
+**Response**:
+```json
+{
+  "job_id": "uuid-string",
+  "status": "queued",
+  "message": "Job submitted successfully. Use /status/{job_id} to check progress."
+}
+```
+
+### 3. Get Job Status and Progress
+```bash
+GET /status/<job_id>
+```
+
+**Response**:
+```json
+{
+  "id": "job-id",
+  "status": "inference",
+  "progress": 75,
+  "message": "Inference step 30/40",
+  "prompt": "Make this cinematic",
+  "filename": "video.mp4",
+  "created_at": "2024-01-01T10:00:00",
+  "updated_at": "2024-01-01T10:15:00",
+  "has_output": false
+}
+```
+
+### 4. Download Processed Video
+```bash
+GET /download/<job_id>
+```
+
+**Response**: Returns the processed video file as download
+
+### 5. List All Jobs
+```bash
+GET /jobs
+```
+
+**Response**:
+```json
+{
+  "jobs": [
+    {
+      "id": "job-id",
+      "status": "completed",
+      "progress": 100,
+      "message": "Processing completed successfully!",
+      "created_at": "2024-01-01T10:00:00",
+      "updated_at": "2024-01-01T10:20:00"
+    }
+  ],
+  "total": 1
+}
+```
+
+### 6. Server Status
+```bash
+GET /status
+```
+
+**Response**:
+```json
+{
+  "status": "running",
+  "jobs": {"completed": 5, "processing": 2, "queued": 1},
+  "upload_files": 0,
+  "result_directories": 8,
+  "allowed_extensions": ["mp4", "avi", "mov", "mkv", "webm"],
+  "max_file_size_mb": 500
+}
+```
+
+### 7. Manual Cleanup
+```bash
+POST /cleanup
+```
+
+**Response**:
+```json
+{
+  "message": "Cleanup completed successfully"
+}
+```
+
+## Usage Examples
+
+### Using the Test Client
+
+1. **Ping the server**:
+   ```bash
+   python test_client.py ping http://localhost:5000
+   ```
+
+2. **Check server status**:
+   ```bash
+   python test_client.py status http://localhost:5000
+   ```
+
+3. **Submit a job and monitor progress**:
+   ```bash
+   python test_client.py process http://localhost:5000 my_video.mp4 "Make this video look cinematic with enhanced depth"
+   ```
+
+4. **Submit job only (non-blocking)**:
+   ```bash
+   python test_client.py submit http://localhost:5000 my_video.mp4 "Make cinematic"
+   ```
+
+5. **Monitor job progress**:
+   ```bash
+   python test_client.py monitor http://localhost:5000 <job_id>
+   ```
+
+6. **Download completed video**:
+   ```bash
+   python test_client.py download http://localhost:5000 <job_id>
+   ```
+
+7. **List all jobs**:
+   ```bash
+   python test_client.py jobs http://localhost:5000
+   ```
+
+### Using curl
+
+1. **Ping**:
+   ```bash
+   curl http://localhost:5000/ping
+   ```
+
+2. **Submit job**:
+   ```bash
+   curl -X POST \
+     -F "video=@my_video.mp4" \
+     -F "prompt=Make this video look cinematic" \
+     http://localhost:5000/process
+   ```
+
+3. **Check job status**:
+   ```bash
+   curl http://localhost:5000/status/<job_id>
+   ```
+
+4. **Download result**:
+   ```bash
+   curl http://localhost:5000/download/<job_id> --output processed_video.mp4
+   ```
+
+### Using Python requests
+
+```python
+import requests
+import time
+
+# Ping server
+response = requests.get('http://localhost:5000/ping')
+print(response.json())
+
+# Submit job
+with open('my_video.mp4', 'rb') as video_file:
+    files = {'video': video_file}
+    data = {'prompt': 'Make this video look cinematic'}
+    response = requests.post('http://localhost:5000/process', files=files, data=data)
+    
+    if response.status_code == 202:
+        job_data = response.json()
+        job_id = job_data['job_id']
+        print(f"Job submitted: {job_id}")
+        
+        # Monitor progress
+        while True:
+            status_response = requests.get(f'http://localhost:5000/status/{job_id}')
+            status = status_response.json()
+            
+            print(f"Progress: {status['progress']}% - {status['message']}")
+            
+            if status['status'] == 'completed':
+                # Download result
+                download_response = requests.get(f'http://localhost:5000/download/{job_id}')
+                with open('processed_video.mp4', 'wb') as f:
+                    f.write(download_response.content)
+                print("Video processed and downloaded successfully!")
+                break
+            elif status['status'] == 'failed':
+                print(f"Job failed: {status.get('error', 'Unknown error')}")
+                break
+            
+            time.sleep(5)  # Check every 5 seconds
+    else:
+        print(f"Error: {response.json()}")
+```
+
+## Configuration
+
+You can modify these settings in `vace_server.py`:
+
+- `MAX_CONTENT_LENGTH`: Maximum file size (default: 500MB)
+- `ALLOWED_EXTENSIONS`: Allowed video file extensions
+- `UPLOAD_FOLDER`: Directory for temporary uploads
+- `RESULTS_FOLDER`: Directory for processing results
+- Port and host settings in the `app.run()` call
+
+## External Access Setup (Cloudflare Tunnel)
+
+Follow these steps to make your server accessible externally without a public IP:
+
+### Step 1: Install Cloudflare Tunnel
+```bash
+chmod +x setup_cloudflare_tunnel.sh
+./setup_cloudflare_tunnel.sh
+```
+
+### Step 2: Start your VACE server (in one terminal)
+```bash
+python vace_server.py
+```
+
+You should see output like:
+```
+Starting VACE server...
+Available endpoints:
+  GET  /ping     - Health check
+  POST /process  - Process video (requires 'video' file and 'prompt' text)
+  GET  /status   - Server status
+  POST /cleanup  - Manual cleanup
+ * Running on all addresses (0.0.0.0)
+ * Running on http://127.0.0.1:5000
+ * Running on http://YOUR_LOCAL_IP:5000
+```
+
+### Step 3: Create the Cloudflare tunnel (in another terminal)
+```bash
+cloudflared tunnel --url http://localhost:5000
+```
+
+You'll see output like:
+```
+2024-01-XX 10:30:45 INF Thank you for trying Cloudflare Tunnel...
+2024-01-XX 10:30:46 INF +--------------------------------------------------------------------------------------------+
+2024-01-XX 10:30:46 INF |  Your quick Tunnel has been created! Visit it at (it may take some time to be reachable):  |
+2024-01-XX 10:30:46 INF |  https://random-words-123.trycloudflare.com                                               |
+2024-01-XX 10:30:46 INF +--------------------------------------------------------------------------------------------+
+```
+
+### Step 4: Test the connection
+```bash
+# Replace with your actual tunnel URL
+python test_client.py ping https://random-words-123.trycloudflare.com
+```
+
+You should see:
+```
+✓ Server is running: VACE server is running
+```
+
+### Step 5: Process a video
+```bash
+python test_client.py process https://random-words-123.trycloudflare.com your_video.mp4 "Make this video look cinematic with enhanced depth"
+```
+
+## Important Notes:
+- **Keep both terminals running**: The VACE server and the cloudflared tunnel both need to stay active
+- **The URL changes**: Each time you restart the tunnel, you get a new random URL
+- **No account needed**: This works without signing up for Cloudflare
+- **HTTPS included**: Your tunnel automatically gets SSL/TLS encryption
+
+## Troubleshooting
+
+1. **Server won't start**: Check if port 5000 is already in use
+2. **Processing fails**: Check VACE pipeline works independently
+3. **File upload fails**: Check file size and format
+4. **Timeout errors**: Increase timeout values for large videos
+5. **Memory issues**: Monitor GPU memory usage during processing
+
+## Logs
+
+The server logs all activities to the console. Key information includes:
+- Request processing start/completion
+- Error messages and stack traces
+- File cleanup operations
+- Server startup information
+
+## Security Notes
+
+- This server is designed for internal/trusted network use
+- No authentication is implemented
+- File uploads are temporarily stored on disk
+- Consider adding authentication for production use 
