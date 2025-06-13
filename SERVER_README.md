@@ -9,7 +9,8 @@ A Flask-based HTTP server with async processing and progress tracking for long-r
 - **Job Management**: Submit jobs, monitor progress, and download results
 - **Job Persistence**: Jobs survive server restarts with automatic recovery
 - **Smart Recovery**: Automatically recovers existing jobs from filesystem on startup
-- **Video Upload**: Accepts video files up to 500MB
+- **Video Upload**: Accepts video files up to 500MB or video URLs
+- **URL Support**: Download videos from HTTP/HTTPS URLs, including AWS S3 signed URLs
 - **Text Prompts**: Process videos with custom text prompts
 - **Depth Task**: Uses VACE's depth control task with Wan model
 - **Ping Endpoint**: Health check for connectivity testing
@@ -56,8 +57,16 @@ GET /ping
 POST /process
 ```
 
-**Parameters**:
+**Parameters (Form Upload)**:
 - `video` (file): Video file to process (mp4, avi, mov, mkv, webm)
+- `prompt` (text): Text prompt for video processing
+
+**Parameters (URL Download)**:
+- `video_url` (text): URL to video file (supports HTTP/HTTPS, including AWS S3 signed URLs)
+- `prompt` (text): Text prompt for video processing
+
+**Alternative Form Format**:
+- `video_url` (text): URL to video file
 - `prompt` (text): Text prompt for video processing
 
 **Response**:
@@ -179,12 +188,20 @@ Manually triggers job recovery from the filesystem. This scans the `results/` di
 
 3. **Submit a job and monitor progress**:
    ```bash
+   # With local file
    python test_client.py process http://localhost:5000 my_video.mp4 "Make this video look cinematic with enhanced depth"
+   
+   # With URL
+   python test_client.py process http://localhost:5000 "https://example.com/video.mp4" "Make cinematic" --url
    ```
 
 4. **Submit job only (non-blocking)**:
    ```bash
+   # With local file
    python test_client.py submit http://localhost:5000 my_video.mp4 "Make cinematic"
+   
+   # With URL
+   python test_client.py submit http://localhost:5000 "https://example.com/video.mp4" "Make cinematic" --url
    ```
 
 5. **Monitor job progress**:
@@ -214,7 +231,7 @@ Manually triggers job recovery from the filesystem. This scans the `results/` di
    curl http://localhost:5000/ping
    ```
 
-2. **Submit job**:
+2. **Submit job with file**:
    ```bash
    curl -X POST \
      -F "video=@my_video.mp4" \
@@ -222,17 +239,33 @@ Manually triggers job recovery from the filesystem. This scans the `results/` di
      http://localhost:5000/process
    ```
 
-3. **Check job status**:
+3. **Submit job with URL (JSON)**:
+   ```bash
+   curl -X POST \
+     -H "Content-Type: application/json" \
+     -d '{"video_url": "https://example.com/video.mp4", "prompt": "Make cinematic"}' \
+     http://localhost:5000/process
+   ```
+
+4. **Submit job with URL (Form)**:
+   ```bash
+   curl -X POST \
+     -F "video_url=https://example.com/video.mp4" \
+     -F "prompt=Make this video look cinematic" \
+     http://localhost:5000/process
+   ```
+
+5. **Check job status**:
    ```bash
    curl http://localhost:5000/status/<job_id>
    ```
 
-4. **Download result**:
+6. **Download result**:
    ```bash
    curl http://localhost:5000/download/<job_id> --output processed_video.mp4
    ```
 
-5. **Recover jobs**:
+7. **Recover jobs**:
    ```bash
    curl -X POST http://localhost:5000/recover
    ```
@@ -313,8 +346,56 @@ curl -X POST http://localhost:5000/recover
 
 ### **Files Created**
 - `jobs_database.pkl`: Persistent job database
-- `uploads/`: Temporary upload storage
+- `uploads/`: Temporary upload storage (for both uploaded files and downloaded URLs)
 - `results/<job_id>/`: Individual job result directories
+
+## Video URL Support
+
+The server supports processing videos from URLs in addition to file uploads:
+
+### **Supported URL Types**
+- HTTP/HTTPS URLs pointing to video files
+- AWS S3 signed URLs (including accelerated endpoints)
+- Any publicly accessible video URL
+
+### **URL Processing Features**
+- **Streaming Download**: Large videos are downloaded in chunks to handle memory efficiently
+- **Size Validation**: URLs are checked against the same 500MB limit as file uploads
+- **Format Detection**: File extension is automatically detected from URL or defaults to MP4
+- **Error Handling**: Comprehensive error handling for network issues, timeouts, and invalid URLs
+
+### **AWS S3 Integration**
+The server works seamlessly with AWS S3 signed URLs, including:
+- Standard S3 URLs (`s3.us-west-2.amazonaws.com`)
+- S3 Transfer Acceleration URLs (`s3-accelerate.amazonaws.com`)
+- Pre-signed URLs with query parameters
+- Temporary access URLs
+
+### **Usage Examples**
+
+**JSON Request (Recommended)**:
+```bash
+curl -X POST \
+  -H "Content-Type: application/json" \
+  -d '{
+    "video_url": "https://your-bucket.s3.amazonaws.com/video.mp4?AWSAccessKeyId=...",
+    "prompt": "Make this video cinematic"
+  }' \
+  http://localhost:5000/process
+```
+
+**Form Request**:
+```bash
+curl -X POST \
+  -F "video_url=https://example.com/video.mp4" \
+  -F "prompt=Make cinematic" \
+  http://localhost:5000/process
+```
+
+**Test Client**:
+```bash
+python test_client.py process http://localhost:5000 "https://example.com/video.mp4" "Make cinematic" --url
+```
 
 ## Configuration
 

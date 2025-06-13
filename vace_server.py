@@ -19,6 +19,9 @@ from datetime import datetime
 from collections import defaultdict
 import json
 import pickle
+import requests
+from urllib.parse import urlparse
+import tempfile
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -54,6 +57,60 @@ def allowed_file(filename):
     """Check if the uploaded file has an allowed extension."""
     return '.' in filename and \
            filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
+
+def download_video_from_url(url, job_id):
+    """Download video from URL and return local file path."""
+    try:
+        logger.info(f"Job {job_id}: Downloading video from URL: {url}")
+        
+        # Parse URL to get filename hint
+        parsed_url = urlparse(url)
+        url_filename = os.path.basename(parsed_url.path)
+        
+        # Determine file extension
+        if url_filename and '.' in url_filename:
+            file_extension = url_filename.rsplit('.', 1)[1].lower()
+            if file_extension not in ALLOWED_EXTENSIONS:
+                file_extension = 'mp4'  # Default fallback
+        else:
+            file_extension = 'mp4'  # Default fallback
+        
+        # Create local filename
+        local_filename = f"{job_id}_input.{file_extension}"
+        local_path = os.path.join(UPLOAD_FOLDER, local_filename)
+        
+        # Download the file with streaming to handle large files
+        response = requests.get(url, stream=True, timeout=300)  # 5 minute timeout
+        response.raise_for_status()
+        
+        # Check content length if available
+        content_length = response.headers.get('content-length')
+        if content_length and int(content_length) > MAX_CONTENT_LENGTH:
+            raise ValueError(f"File too large: {int(content_length)} bytes (max: {MAX_CONTENT_LENGTH})")
+        
+        # Download with progress tracking
+        total_size = 0
+        with open(local_path, 'wb') as f:
+            for chunk in response.iter_content(chunk_size=8192):
+                if chunk:
+                    f.write(chunk)
+                    total_size += len(chunk)
+                    
+                    # Check size limit during download
+                    if total_size > MAX_CONTENT_LENGTH:
+                        f.close()
+                        os.remove(local_path)
+                        raise ValueError(f"File too large: {total_size} bytes (max: {MAX_CONTENT_LENGTH})")
+        
+        logger.info(f"Job {job_id}: Downloaded {total_size} bytes to {local_filename}")
+        return local_path, url_filename or f"video.{file_extension}"
+        
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Job {job_id}: Failed to download video from URL: {str(e)}")
+        raise ValueError(f"Failed to download video: {str(e)}")
+    except Exception as e:
+        logger.error(f"Job {job_id}: Error downloading video: {str(e)}")
+        raise ValueError(f"Error downloading video: {str(e)}")
 
 def cleanup_old_files(directory, max_age_hours=24):
     """Clean up files older than max_age_hours."""
@@ -350,33 +407,60 @@ def ping():
 def process_video():
     """Submit video for processing (non-blocking)."""
     try:
-        # Check if video file is present
-        if 'video' not in request.files:
-            return jsonify({'error': 'No video file provided'}), 400
-        
-        video_file = request.files['video']
-        if video_file.filename == '':
-            return jsonify({'error': 'No video file selected'}), 400
-        
         # Check if prompt is provided
-        prompt = request.form.get('prompt')
+        prompt = request.form.get('prompt') or request.json.get('prompt') if request.is_json else None
         if not prompt:
             return jsonify({'error': 'No prompt provided'}), 400
-        
-        # Validate file type
-        if not allowed_file(video_file.filename):
-            return jsonify({'error': f'File type not allowed. Allowed types: {ALLOWED_EXTENSIONS}'}), 400
         
         # Generate unique job ID
         job_id = str(uuid.uuid4())
         logger.info(f"Received job {job_id} with prompt: {prompt}")
         
-        # Save uploaded video
-        filename = secure_filename(video_file.filename)
-        file_extension = filename.rsplit('.', 1)[1].lower()
-        input_filename = f"{job_id}_input.{file_extension}"
-        input_path = os.path.join(UPLOAD_FOLDER, input_filename)
-        video_file.save(input_path)
+        # Handle video input - either file upload or URL
+        input_path = None
+        filename = None
+        
+        # Check for video URL (JSON request)
+        if request.is_json:
+            video_url = request.json.get('video_url')
+            if not video_url:
+                return jsonify({'error': 'No video_url provided in JSON request'}), 400
+            
+            try:
+                input_path, filename = download_video_from_url(video_url, job_id)
+            except ValueError as e:
+                return jsonify({'error': str(e)}), 400
+        
+        # Check for video file upload (form request)
+        elif 'video' in request.files:
+            video_file = request.files['video']
+            if video_file.filename == '':
+                return jsonify({'error': 'No video file selected'}), 400
+            
+            # Validate file type
+            if not allowed_file(video_file.filename):
+                return jsonify({'error': f'File type not allowed. Allowed types: {ALLOWED_EXTENSIONS}'}), 400
+            
+            # Save uploaded video
+            filename = secure_filename(video_file.filename)
+            file_extension = filename.rsplit('.', 1)[1].lower()
+            input_filename = f"{job_id}_input.{file_extension}"
+            input_path = os.path.join(UPLOAD_FOLDER, input_filename)
+            video_file.save(input_path)
+        
+        # Check for video_url in form data (alternative format)
+        elif request.form.get('video_url'):
+            video_url = request.form.get('video_url')
+            try:
+                input_path, filename = download_video_from_url(video_url, job_id)
+            except ValueError as e:
+                return jsonify({'error': str(e)}), 400
+        
+        else:
+            return jsonify({'error': 'No video file or video_url provided'}), 400
+        
+        if not input_path or not os.path.exists(input_path):
+            return jsonify({'error': 'Failed to process video input'}), 500
         
         # Create output directory for this job
         output_dir = os.path.join(RESULTS_FOLDER, job_id)

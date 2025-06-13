@@ -46,23 +46,36 @@ def get_server_status(server_url):
         print(f"✗ Failed to get status: {e}")
         return False
 
-def submit_job(server_url, video_path, prompt):
+def submit_job(server_url, video_input, prompt, is_url=False):
     """Submit video processing job."""
     try:
         print(f"Submitting job...")
-        print(f"Video: {video_path}")
+        print(f"Video: {video_input}")
         print(f"Prompt: {prompt}")
         
-        with open(video_path, 'rb') as video_file:
-            files = {'video': video_file}
-            data = {'prompt': prompt}
-            
+        if is_url:
+            # Submit as JSON with video URL
+            data = {
+                'video_url': video_input,
+                'prompt': prompt
+            }
             response = requests.post(
                 f"{server_url}/process",
-                files=files,
-                data=data,
+                json=data,
                 timeout=30
             )
+        else:
+            # Submit as form with video file
+            with open(video_input, 'rb') as video_file:
+                files = {'video': video_file}
+                data = {'prompt': prompt}
+                
+                response = requests.post(
+                    f"{server_url}/process",
+                    files=files,
+                    data=data,
+                    timeout=30
+                )
         
         if response.status_code == 202:
             result = response.json()
@@ -83,7 +96,7 @@ def submit_job(server_url, video_path, prompt):
         print(f"✗ Request failed: {e}")
         return None
     except FileNotFoundError:
-        print(f"✗ Video file not found: {video_path}")
+        print(f"✗ Video file not found: {video_input}")
         return None
 
 def get_job_status(server_url, job_id):
@@ -223,10 +236,10 @@ def recover_jobs(server_url):
         print(f"✗ Recovery failed: {e}")
         return False
 
-def process_video_complete(server_url, video_path, prompt, output_filename=None):
+def process_video_complete(server_url, video_input, prompt, output_filename=None, is_url=False):
     """Complete workflow: submit job, monitor progress, and download result."""
     # Submit job
-    job_id = submit_job(server_url, video_path, prompt)
+    job_id = submit_job(server_url, video_input, prompt, is_url)
     if not job_id:
         return False
     
@@ -243,16 +256,17 @@ def main():
         print("Usage:")
         print(f"  {sys.argv[0]} ping <server_url>")
         print(f"  {sys.argv[0]} status <server_url>")
-        print(f"  {sys.argv[0]} submit <server_url> <video_path> <prompt>")
+        print(f"  {sys.argv[0]} submit <server_url> <video_path_or_url> <prompt> [--url]")
         print(f"  {sys.argv[0]} monitor <server_url> <job_id>")
         print(f"  {sys.argv[0]} download <server_url> <job_id> [output_filename]")
         print(f"  {sys.argv[0]} jobs <server_url>")
         print(f"  {sys.argv[0]} recover <server_url>")
-        print(f"  {sys.argv[0]} process <server_url> <video_path> <prompt> [output_filename]")
+        print(f"  {sys.argv[0]} process <server_url> <video_path_or_url> <prompt> [output_filename] [--url]")
         print()
         print("Examples:")
         print(f"  {sys.argv[0]} ping http://localhost:5000")
         print(f"  {sys.argv[0]} process http://localhost:5000 video.mp4 'Make cinematic'")
+        print(f"  {sys.argv[0]} process http://localhost:5000 'https://example.com/video.mp4' 'Make cinematic' --url")
         print(f"  {sys.argv[0]} jobs http://localhost:5000")
         print(f"  {sys.argv[0]} recover http://localhost:5000")
         sys.exit(1)
@@ -283,13 +297,14 @@ def main():
             sys.exit(1)
         
     elif command == "submit":
-        if len(sys.argv) != 5:
-            print("Usage: submit <server_url> <video_path> <prompt>")
+        if len(sys.argv) < 5 or len(sys.argv) > 6:
+            print("Usage: submit <server_url> <video_path_or_url> <prompt> [--url]")
             sys.exit(1)
         server_url = sys.argv[2]
-        video_path = sys.argv[3]
+        video_input = sys.argv[3]
         prompt = sys.argv[4]
-        submit_job(server_url, video_path, prompt)
+        is_url = len(sys.argv) == 6 and sys.argv[5] == "--url"
+        submit_job(server_url, video_input, prompt, is_url)
         
     elif command == "monitor":
         if len(sys.argv) != 4:
@@ -323,14 +338,24 @@ def main():
         recover_jobs(server_url)
         
     elif command == "process":
-        if len(sys.argv) < 5 or len(sys.argv) > 6:
-            print("Usage: process <server_url> <video_path> <prompt> [output_filename]")
+        if len(sys.argv) < 5 or len(sys.argv) > 7:
+            print("Usage: process <server_url> <video_path_or_url> <prompt> [output_filename] [--url]")
             sys.exit(1)
         server_url = sys.argv[2]
-        video_path = sys.argv[3]
+        video_input = sys.argv[3]
         prompt = sys.argv[4]
-        output_filename = sys.argv[5] if len(sys.argv) == 6 else None
-        process_video_complete(server_url, video_path, prompt, output_filename)
+        
+        # Parse optional arguments
+        output_filename = None
+        is_url = False
+        
+        for i in range(5, len(sys.argv)):
+            if sys.argv[i] == "--url":
+                is_url = True
+            else:
+                output_filename = sys.argv[i]
+        
+        process_video_complete(server_url, video_input, prompt, output_filename, is_url)
         
     else:
         print(f"Unknown command: {command}")
