@@ -14,6 +14,7 @@ import threading
 import subprocess
 from pathlib import Path
 from flask import Flask, request, jsonify, send_file
+from flask_cors import CORS
 from werkzeug.utils import secure_filename
 from datetime import datetime
 from collections import defaultdict
@@ -28,6 +29,15 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
+
+# Configure CORS
+CORS(app, resources={
+    r"/*": {
+        "origins": "*",
+        "methods": ["GET", "POST", "OPTIONS"],
+        "allow_headers": ["Content-Type", "Accept"]
+    }
+})
 
 # Configuration
 UPLOAD_FOLDER = 'uploads'
@@ -397,11 +407,25 @@ def process_video_background(job_id, input_path, prompt, output_dir):
 @app.route('/ping', methods=['GET'])
 def ping():
     """Health check endpoint."""
-    return jsonify({
+    response = jsonify({
         'status': 'ok',
         'message': 'VACE server is running',
         'timestamp': time.time()
     })
+    # Explicitly add CORS headers
+    response.headers.add('Access-Control-Allow-Origin', '*')
+    response.headers.add('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
+    response.headers.add('Access-Control-Allow-Headers', 'Content-Type, Accept')
+    return response
+
+@app.route('/ping', methods=['OPTIONS'])
+def ping_options():
+    """Handle CORS preflight requests for ping endpoint."""
+    response = jsonify({})
+    response.headers.add('Access-Control-Allow-Origin', '*')
+    response.headers.add('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
+    response.headers.add('Access-Control-Allow-Headers', 'Content-Type, Accept')
+    return response
 
 @app.route('/process', methods=['POST'])
 def process_video():
