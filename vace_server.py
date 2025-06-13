@@ -18,6 +18,7 @@ from werkzeug.utils import secure_filename
 from datetime import datetime
 from collections import defaultdict
 import json
+import pickle
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -28,6 +29,7 @@ app = Flask(__name__)
 # Configuration
 UPLOAD_FOLDER = 'uploads'
 RESULTS_FOLDER = 'results'
+JOBS_DB_FILE = 'jobs_database.pkl'
 MAX_CONTENT_LENGTH = 500 * 1024 * 1024  # 500MB max file size
 ALLOWED_EXTENSIONS = {'mp4', 'avi', 'mov', 'mkv', 'webm'}
 
@@ -67,6 +69,133 @@ def cleanup_old_files(directory, max_age_hours=24):
     except Exception as e:
         logger.error(f"Error during cleanup: {str(e)}")
 
+def save_jobs_database():
+    """Save jobs database to disk."""
+    try:
+        with open(JOBS_DB_FILE, 'wb') as f:
+            pickle.dump(jobs, f)
+    except Exception as e:
+        logger.error(f"Failed to save jobs database: {str(e)}")
+
+def recover_jobs_from_filesystem():
+    """Recover jobs by scanning the results directory for existing job folders."""
+    recovered_jobs = {}
+    try:
+        if os.path.exists(RESULTS_FOLDER):
+            for item in os.listdir(RESULTS_FOLDER):
+                item_path = os.path.join(RESULTS_FOLDER, item)
+                if os.path.isdir(item_path):
+                    # Check if this looks like a job ID (UUID format)
+                    try:
+                        uuid.UUID(item)  # Validate UUID format
+                        job_id = item
+                        
+                        # Look for output video file
+                        output_file = None
+                        video_files = []
+                        for root, dirs, files in os.walk(item_path):
+                            for file in files:
+                                if file.endswith(('.mp4', '.avi', '.mov', '.mkv', '.webm')):
+                                    video_files.append(os.path.join(root, file))
+                        
+                        if video_files:
+                            # Apply same prioritization logic as in processing
+                            for file_path in video_files:
+                                filename = os.path.basename(file_path)
+                                if filename == 'out_video.mp4':
+                                    output_file = file_path
+                                    break
+                            
+                            if not output_file:
+                                for file_path in video_files:
+                                    filename = os.path.basename(file_path)
+                                    if any(name in filename.lower() for name in ['output', 'result', 'processed', 'final']):
+                                        output_file = file_path
+                                        break
+                            
+                            if not output_file:
+                                filtered_files = []
+                                for file_path in video_files:
+                                    filename = os.path.basename(file_path)
+                                    if not any(name in filename.lower() for name in ['src_mask', 'src_video', 'mask', 'depth', 'flow', 'pose', 'input']):
+                                        filtered_files.append(file_path)
+                                
+                                if filtered_files:
+                                    output_file = filtered_files[0]
+                                else:
+                                    output_file = video_files[0]
+                        
+                        if output_file:
+                            # Get file creation time for approximate job creation time
+                            creation_time = datetime.fromtimestamp(os.path.getctime(item_path)).isoformat()
+                            
+                            recovered_jobs[job_id] = {
+                                'id': job_id,
+                                'status': JobStatus.COMPLETED,
+                                'progress': 100,
+                                'message': 'Recovered from filesystem',
+                                'prompt': 'Unknown (recovered job)',
+                                'filename': 'Unknown (recovered job)',
+                                'created_at': creation_time,
+                                'updated_at': creation_time,
+                                'output_file': output_file,
+                                'error': None
+                            }
+                            logger.info(f"Recovered job {job_id} with output: {os.path.basename(output_file)}")
+                    
+                    except ValueError:
+                        # Not a valid UUID, skip
+                        continue
+        
+        logger.info(f"Recovered {len(recovered_jobs)} jobs from filesystem")
+        return recovered_jobs
+    
+    except Exception as e:
+        logger.error(f"Failed to recover jobs from filesystem: {str(e)}")
+        return {}
+
+def load_jobs_database():
+    """Load jobs database from disk."""
+    global jobs
+    try:
+        if os.path.exists(JOBS_DB_FILE):
+            with open(JOBS_DB_FILE, 'rb') as f:
+                loaded_jobs = pickle.load(f)
+                # Verify that output files still exist and update status if needed
+                for job_id, job in loaded_jobs.items():
+                    if job['status'] == JobStatus.COMPLETED and job.get('output_file'):
+                        if not os.path.exists(job['output_file']):
+                            job['status'] = JobStatus.FAILED
+                            job['error'] = 'Output file no longer exists'
+                            job['output_file'] = None
+                    elif job['status'] in [JobStatus.QUEUED, JobStatus.PREPROCESSING, JobStatus.INFERENCE]:
+                        # Mark running jobs as failed since they were interrupted
+                        job['status'] = JobStatus.FAILED
+                        job['error'] = 'Job interrupted by server restart'
+                
+                jobs = loaded_jobs
+                logger.info(f"Loaded {len(jobs)} jobs from database")
+        else:
+            logger.info("No jobs database found, starting fresh")
+            jobs = {}
+        
+        # Also try to recover any jobs from filesystem that aren't in the database
+        recovered_jobs = recover_jobs_from_filesystem()
+        for job_id, job in recovered_jobs.items():
+            if job_id not in jobs:
+                jobs[job_id] = job
+        
+        if recovered_jobs:
+            # Save the updated database with recovered jobs
+            save_jobs_database()
+            
+    except Exception as e:
+        logger.error(f"Failed to load jobs database: {str(e)}")
+        # If database loading fails, try to recover from filesystem
+        jobs = recover_jobs_from_filesystem()
+        if jobs:
+            save_jobs_database()
+
 def update_job_status(job_id, status, progress=None, message=None, error=None):
     """Update job status thread-safely."""
     with job_lock:
@@ -79,6 +208,9 @@ def update_job_status(job_id, status, progress=None, message=None, error=None):
                 jobs[job_id]['message'] = message
             if error is not None:
                 jobs[job_id]['error'] = error
+            
+            # Save to disk after each update
+            save_jobs_database()
 
 def parse_vace_output(line, job_id):
     """Parse VACE pipeline output for progress information."""
@@ -146,7 +278,7 @@ def process_video_background(job_id, input_path, prompt, output_dir):
         return_code = process.poll()
         
         if return_code == 0:
-            # Find the output video file
+            # Find the output video file - prioritize out_video.mp4
             output_files = []
             for root, dirs, files in os.walk(output_dir):
                 for file in files:
@@ -154,9 +286,41 @@ def process_video_background(job_id, input_path, prompt, output_dir):
                         output_files.append(os.path.join(root, file))
             
             if output_files:
+                # Prioritize out_video.mp4 as the main output
+                main_output = None
+                for file_path in output_files:
+                    filename = os.path.basename(file_path)
+                    if filename == 'out_video.mp4':
+                        main_output = file_path
+                        break
+                
+                # If out_video.mp4 not found, look for other common output names
+                if not main_output:
+                    for file_path in output_files:
+                        filename = os.path.basename(file_path)
+                        if any(name in filename.lower() for name in ['output', 'result', 'processed', 'final']):
+                            main_output = file_path
+                            break
+                
+                # If still not found, exclude known intermediate files and pick the first remaining
+                if not main_output:
+                    filtered_files = []
+                    for file_path in output_files:
+                        filename = os.path.basename(file_path)
+                        # Exclude known intermediate/input files
+                        if not any(name in filename.lower() for name in ['src_mask', 'src_video', 'mask', 'depth', 'flow', 'pose', 'input']):
+                            filtered_files.append(file_path)
+                    
+                    if filtered_files:
+                        main_output = filtered_files[0]
+                    else:
+                        main_output = output_files[0]  # Fallback to any video file
+                
                 update_job_status(job_id, JobStatus.COMPLETED, 100, "Processing completed successfully!")
                 with job_lock:
-                    jobs[job_id]['output_file'] = output_files[0]
+                    jobs[job_id]['output_file'] = main_output
+                    save_jobs_database()  # Save after setting output file
+                logger.info(f"Job {job_id}: Selected output file: {os.path.basename(main_output)}")
             else:
                 update_job_status(job_id, JobStatus.FAILED, 0, error="No output video found")
         else:
@@ -232,6 +396,8 @@ def process_video():
                 'output_file': None,
                 'error': None
             }
+            # Save to disk immediately after creating job
+            save_jobs_database()
         
         # Start background processing
         thread = threading.Thread(
@@ -348,16 +514,44 @@ def cleanup():
                 jobs_to_remove = sorted_jobs[:-100]
                 for job_id, _ in jobs_to_remove:
                     del jobs[job_id]
+                save_jobs_database()  # Save after cleanup
         
         return jsonify({'message': 'Cleanup completed successfully'})
     except Exception as e:
         return jsonify({'error': f'Cleanup failed: {str(e)}'}), 500
+
+@app.route('/recover', methods=['POST'])
+def recover_jobs():
+    """Manually trigger job recovery from filesystem."""
+    try:
+        with job_lock:
+            recovered_jobs = recover_jobs_from_filesystem()
+            recovered_count = 0
+            
+            for job_id, job in recovered_jobs.items():
+                if job_id not in jobs:
+                    jobs[job_id] = job
+                    recovered_count += 1
+            
+            if recovered_count > 0:
+                save_jobs_database()
+        
+        return jsonify({
+            'message': f'Recovery completed successfully. Found {recovered_count} new jobs.',
+            'recovered_jobs': recovered_count,
+            'total_jobs': len(jobs)
+        })
+    except Exception as e:
+        return jsonify({'error': f'Recovery failed: {str(e)}'}), 500
 
 @app.errorhandler(413)
 def too_large(e):
     return jsonify({'error': 'File too large. Maximum size is 500MB.'}), 413
 
 if __name__ == '__main__':
+    # Load existing jobs from database
+    load_jobs_database()
+    
     # Clean up old files on startup
     cleanup_old_files(UPLOAD_FOLDER)
     cleanup_old_files(RESULTS_FOLDER)
@@ -372,6 +566,7 @@ if __name__ == '__main__':
     logger.info("  GET  /jobs              - List all jobs")
     logger.info("  GET  /status            - Server status")
     logger.info("  POST /cleanup           - Manual cleanup")
+    logger.info("  POST /recover           - Recover jobs from filesystem")
     
     app.run(
         host='0.0.0.0',

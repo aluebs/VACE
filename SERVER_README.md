@@ -7,6 +7,8 @@ A Flask-based HTTP server with async processing and progress tracking for long-r
 - **Async Processing**: Non-blocking video processing with background tasks
 - **Progress Tracking**: Real-time progress updates with percentage and status messages
 - **Job Management**: Submit jobs, monitor progress, and download results
+- **Job Persistence**: Jobs survive server restarts with automatic recovery
+- **Smart Recovery**: Automatically recovers existing jobs from filesystem on startup
 - **Video Upload**: Accepts video files up to 500MB
 - **Text Prompts**: Process videos with custom text prompts
 - **Depth Task**: Uses VACE's depth control task with Wan model
@@ -145,6 +147,22 @@ POST /cleanup
 }
 ```
 
+### 8. Job Recovery
+```bash
+POST /recover
+```
+
+**Response**:
+```json
+{
+  "message": "Recovery completed successfully. Found 3 new jobs.",
+  "recovered_jobs": 3,
+  "total_jobs": 15
+}
+```
+
+Manually triggers job recovery from the filesystem. This scans the `results/` directory for existing job folders and recovers any jobs that aren't already in the database. Useful if jobs were created before the persistence system was added.
+
 ## Usage Examples
 
 ### Using the Test Client
@@ -184,6 +202,11 @@ POST /cleanup
    python test_client.py jobs http://localhost:5000
    ```
 
+8. **Recover jobs from filesystem**:
+   ```bash
+   python test_client.py recover http://localhost:5000
+   ```
+
 ### Using curl
 
 1. **Ping**:
@@ -207,6 +230,11 @@ POST /cleanup
 4. **Download result**:
    ```bash
    curl http://localhost:5000/download/<job_id> --output processed_video.mp4
+   ```
+
+5. **Recover jobs**:
+   ```bash
+   curl -X POST http://localhost:5000/recover
    ```
 
 ### Using Python requests
@@ -253,6 +281,41 @@ with open('my_video.mp4', 'rb') as video_file:
         print(f"Error: {response.json()}")
 ```
 
+## Job Persistence and Recovery
+
+The server automatically saves job information to `jobs_database.pkl` and can recover jobs after restarts:
+
+### **Automatic Recovery on Startup**
+- Scans `results/` directory for existing job folders
+- Identifies valid UUID-named directories with video files
+- Recovers jobs that aren't already in the database
+- Uses smart file prioritization:
+  1. `out_video.mp4` (main output)
+  2. Files with "output", "result", "processed", "final" in name
+  3. Any video file except intermediate files (src_mask, src_video, etc.)
+
+### **Manual Recovery**
+If you have jobs that aren't showing up (e.g., created before persistence was added):
+```bash
+# Using test client
+python test_client.py recover http://localhost:5000
+
+# Using curl
+curl -X POST http://localhost:5000/recover
+```
+
+### **What Gets Recovered**
+- Job ID (from directory name)
+- Output video file (automatically detected)
+- Status marked as "completed"
+- Creation time (from directory timestamp)
+- Prompt/filename marked as "Unknown (recovered job)"
+
+### **Files Created**
+- `jobs_database.pkl`: Persistent job database
+- `uploads/`: Temporary upload storage
+- `results/<job_id>/`: Individual job result directories
+
 ## Configuration
 
 You can modify these settings in `vace_server.py`:
@@ -261,6 +324,7 @@ You can modify these settings in `vace_server.py`:
 - `ALLOWED_EXTENSIONS`: Allowed video file extensions
 - `UPLOAD_FOLDER`: Directory for temporary uploads
 - `RESULTS_FOLDER`: Directory for processing results
+- `JOBS_DB_FILE`: Job database file (default: jobs_database.pkl)
 - Port and host settings in the `app.run()` call
 
 ## External Access Setup (Cloudflare Tunnel)
@@ -280,12 +344,16 @@ python vace_server.py
 
 You should see output like:
 ```
-Starting VACE server...
+Starting VACE Server...
 Available endpoints:
-  GET  /ping     - Health check
-  POST /process  - Process video (requires 'video' file and 'prompt' text)
-  GET  /status   - Server status
-  POST /cleanup  - Manual cleanup
+  GET  /ping              - Health check
+  POST /process           - Submit video for processing (non-blocking)
+  GET  /status/<job_id>   - Get job status and progress
+  GET  /download/<job_id> - Download processed video
+  GET  /jobs              - List all jobs
+  GET  /status            - Server status
+  POST /cleanup           - Manual cleanup
+  POST /recover           - Recover jobs from filesystem
  * Running on all addresses (0.0.0.0)
  * Running on http://127.0.0.1:5000
  * Running on http://YOUR_LOCAL_IP:5000

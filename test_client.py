@@ -199,6 +199,30 @@ def list_jobs(server_url):
         print(f"✗ Failed to list jobs: {e}")
         return False
 
+def recover_jobs(server_url):
+    """Trigger job recovery from filesystem."""
+    try:
+        print("Triggering job recovery...")
+        response = requests.post(f"{server_url}/recover", timeout=30)
+        
+        if response.status_code == 200:
+            data = response.json()
+            print(f"✓ {data['message']}")
+            print(f"Recovered jobs: {data['recovered_jobs']}")
+            print(f"Total jobs: {data['total_jobs']}")
+            return True
+        else:
+            try:
+                error_data = response.json()
+                print(f"✗ Recovery failed: {error_data.get('error', 'Unknown error')}")
+            except:
+                print(f"✗ Recovery failed with status {response.status_code}")
+            return False
+            
+    except requests.exceptions.RequestException as e:
+        print(f"✗ Recovery failed: {e}")
+        return False
+
 def process_video_complete(server_url, video_path, prompt, output_filename=None):
     """Complete workflow: submit job, monitor progress, and download result."""
     # Submit job
@@ -223,12 +247,14 @@ def main():
         print(f"  {sys.argv[0]} monitor <server_url> <job_id>")
         print(f"  {sys.argv[0]} download <server_url> <job_id> [output_filename]")
         print(f"  {sys.argv[0]} jobs <server_url>")
+        print(f"  {sys.argv[0]} recover <server_url>")
         print(f"  {sys.argv[0]} process <server_url> <video_path> <prompt> [output_filename]")
         print()
         print("Examples:")
         print(f"  {sys.argv[0]} ping http://localhost:5000")
         print(f"  {sys.argv[0]} process http://localhost:5000 video.mp4 'Make cinematic'")
         print(f"  {sys.argv[0]} jobs http://localhost:5000")
+        print(f"  {sys.argv[0]} recover http://localhost:5000")
         sys.exit(1)
     
     command = sys.argv[1]
@@ -289,6 +315,13 @@ def main():
         server_url = sys.argv[2]
         list_jobs(server_url)
         
+    elif command == "recover":
+        if len(sys.argv) != 3:
+            print("Usage: recover <server_url>")
+            sys.exit(1)
+        server_url = sys.argv[2]
+        recover_jobs(server_url)
+        
     elif command == "process":
         if len(sys.argv) < 5 or len(sys.argv) > 6:
             print("Usage: process <server_url> <video_path> <prompt> [output_filename]")
@@ -301,7 +334,7 @@ def main():
         
     else:
         print(f"Unknown command: {command}")
-        print("Available commands: ping, status, submit, monitor, download, jobs, process")
+        print("Available commands: ping, status, submit, monitor, download, jobs, recover, process")
         sys.exit(1)
 
 if __name__ == "__main__":
