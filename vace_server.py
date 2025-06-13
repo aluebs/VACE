@@ -432,7 +432,12 @@ def process_video():
     """Submit video for processing (non-blocking)."""
     try:
         # Check if prompt is provided
-        prompt = request.form.get('prompt') or request.json.get('prompt') if request.is_json else None
+        prompt = None
+        if request.is_json:
+            prompt = request.json.get('prompt')
+        else:
+            prompt = request.form.get('prompt')
+        
         if not prompt:
             return jsonify({'error': 'No prompt provided'}), 400
         
